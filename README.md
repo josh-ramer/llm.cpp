@@ -1,11 +1,13 @@
 # llm.cpp
-Making LLMs from scratch in CPP to build a more fundamental understanding of AI &amp; machines a la Karpathy. Things I plan on focusing on are as follows:
+Making LLMs from scratch in CPP to build a more fundamental understanding of AI &amp; machines a la Karpathy. Things I plan to focus on:
 
 ### Produce Code & Write
    - Focus on producing lots of code.
    - Write interleaved with code in markdown.
    - Produce markdown box & arrow diagrams to explain concepts frequently.
    - Produce DOT diagrams where more detail is needed.
+   - Write concise tests that keep results stable.
+   - Adapt a popular clang formatting style that you like right away.
 
 ### Iterations on CUDA GPU Kernels
    - Detailed descriptions & comparisons between kernels.
