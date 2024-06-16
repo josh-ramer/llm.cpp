@@ -1,4 +1,3 @@
-#include "reference.hpp"
 #include <Eigen/Dense>
 #include <format>
 #include <iostream>
@@ -15,6 +14,7 @@ template <typename T> class Generator {
 public:
   Generator(int seed) { srand(seed); }
 
+  // TODO: imprve random number generation quality
   void normal(T l, T r, vector<T>& data) {
     if ((long long)(l - r) - (l - r) != 0) {
       throw invalid_argument(
@@ -173,33 +173,21 @@ public:
     b = new Tensor<T>(sOut, 1, g);
   }
 
+  LinearLayer(Component<T> comp) {}
+
   Tensor<T>* forward(Tensor<T>& X) {
-    Tensor<T> W = *w;
-    Tensor<T> B = *b;
-
-    cout << "-----------------------" << endl;
-    cout << this->name() << ": forward" << endl;
-    cout << "input: " << X << endl;
-    cout << "weights: " << W << endl;
-    cout << "bias: " << B << endl;
-    cout << "-----------------------" << endl;
-
-    vector<T> ref_logits(W.rows() * X.cols());
-    MatrixXd mW = to_matrix(W);
-    MatrixXd mX = to_matrix(X);
-    Eigen::IOFormat mstyle(4);
-    cout << "reference: \n" << (mW * mX).format(mstyle) << endl;
-
-    Tensor<T>* logits = W * X;
-    cout << "\nlogits: " << *logits << endl;
-    return logits;
+    // TODO: add in the biases
+    return *w * X;
   }
 
   void backward() { cout << this->name() << ": backward" << endl; }
 
-private:
-  Tensor<float>* w;
-  Tensor<float>* b;
+  Tensor<T>* W() { return w; };
+  Tensor<T>* B() { return b; };
+
+protected:
+  Tensor<T>* w;
+  Tensor<T>* b;
 };
 
 template <typename T> class Activation : public Component<T> {
@@ -209,7 +197,10 @@ public:
     cout << this->name() << ": forward" << endl;
     return &X;
   }
+
   void backward() { cout << this->name() << ": backward" << endl; }
+
+  // TODO: every component should have a print operator override.
 };
 
 template <typename T> class SimpleNet : public NeuralNetwork<T> {
@@ -221,7 +212,22 @@ public:
   };
 
   Tensor<T>* forward(Tensor<T>& X) {
-    Tensor<T>* logits = this->layers["l0"]->forward(X);
+    LinearLayer<T> l0 = *(LinearLayer<T>*)this->layers["l0"];
+    cout << "-----------------------" << endl;
+    cout << this->name() << ": forward\n" << endl;
+    cout << "input: " << X << endl;
+    cout << "weights: " << *l0.W() << endl;
+    cout << "bias: " << *l0.B() << endl;
+
+    MatrixXd mW = to_matrix(*l0.W());
+    MatrixXd mX = to_matrix(X);
+    Eigen::IOFormat mstyle(4);
+    cout << "reference logits: \n" << (mW * mX).format(mstyle) << endl;
+
+    Tensor<T>* logits = l0.forward(X);
+    cout << "\nlogits: " << *logits << endl;
+    cout << "-----------------------" << endl;
+
     this->layers["activation"]->forward(X);
     this->layers["loss"]->forward(X);
     return logits;
