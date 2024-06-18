@@ -1,6 +1,10 @@
+#ifndef FILE_NEURAL_NETWORK_SEEN
+#define FILE_NEURAL_NETWORK_SEEN
+
 #include <format>
 #include <iomanip>
 #include <iostream>
+#include <math.h>
 #include <ostream>
 #include <stdexcept>
 #include <stdlib.h>
@@ -25,11 +29,6 @@ public:
   Tensor(int Rows, int Cols, int N = 1);
   Tensor(Tensor<D>& T);
 
-  int len();
-  int size();
-  int rows();
-  int cols();
-
   void mmul(Tensor<D>& R, Tensor<D>& O);
   friend Tensor<D>& operator*(Tensor<D>& L, Tensor<D>& R) {
     Tensor<D>* O = new Tensor<D>(L.NRows, R.NCols);
@@ -37,17 +36,31 @@ public:
     return *O;
   };
 
-  Tensor<D> t();
+  // TODO: implement elementwise division of tensors (broadcasting)
+  friend Tensor<D>& operator/(Tensor<D>& L, Tensor<D>& R) {
+    Tensor<D>* O = new Tensor<D>(L.NRows, R.NCols);
+    L.mmul(R, *O);
+    return *O;
+  };
+
+  Tensor<D>& t();
   D& operator[](int Index);
   Tensor<D>& operator+=(Tensor<D>& R);
-  Tensor<D> operator+(Tensor<D>& R);
-  const vector<D> data();
-
+  Tensor<D>& operator-=(Tensor<D>& R);
+  Tensor<D>& operator+(Tensor<D>& R);
+  Tensor<D>& operator-(Tensor<D>& R);
+  Tensor<D>& tanH();
+  Tensor<D>& sum();
   ostream& streamOut(ostream& OStream);
-
   friend ostream& operator<<(ostream& OStream, Tensor<D>& T) {
     return T.streamOut(OStream);
   }
+
+  int len();
+  int size();
+  int rows();
+  int cols();
+  const vector<D> data();
 
 private:
   vector<D>* Data;
@@ -98,9 +111,20 @@ protected:
   unordered_map<string, Layer<T>*> Layers;
 };
 
-template <typename T> class Loss : public Layer<T> {
+template <typename T> class Loss : public Component<T> {
 public:
   Loss() {}
+  Tensor<T>& targets();
+
+protected:
+  Tensor<T>* Targets;
+};
+
+template <typename T> Tensor<T>& Loss<T>::targets() { return *Targets; }
+
+template <typename T> class MSE : public Loss<T> {
+public:
+  MSE() {}
   Tensor<T>& forward(Tensor<T>& A);
   void backward();
 };
@@ -116,7 +140,7 @@ public:
 
 template <typename T> class TanH : public Layer<T> {
 public:
-  TanH();
+  TanH() {};
   Tensor<T>& forward(Tensor<T>& X);
   void backward();
 };
@@ -195,15 +219,17 @@ template <typename D> void Tensor<D>::mmul(Tensor<D>& RS, Tensor<D>& O) {
   }
 }
 
-template <typename D> Tensor<D> Tensor<D>::t() {
+// TODO: everywhere we create a heap variable, free or delete needs to happen
+// down the line - destructor?
+template <typename D> Tensor<D>& Tensor<D>::t() {
   Tensor<D> T = *this;
-  Tensor<D> Transpose(NCols, NRows);
+  Tensor<D> Transpose = *(new Tensor<D>(NCols, NRows));
   for (int R = 0; R < NRows; R++) {
     for (int C = 0; C < NCols; C++) {
       Transpose[C * NCols + R] = T[C + R * NCols];
     }
   }
-  return Transpose;
+  return &Transpose;
 }
 
 template <typename D> D& Tensor<D>::operator[](int Index) {
@@ -213,13 +239,39 @@ template <typename D> D& Tensor<D>::operator[](int Index) {
   return (*Data)[Index];
 }
 
-template <typename D> Tensor<D> Tensor<D>::operator+(Tensor<D>& R) {
-  Tensor<D>& LS(*this);
+template <typename D> Tensor<D>& Tensor<D>::operator+(Tensor<D>& R) {
+  Tensor<D>& LS = *(new Tensor<D>(*this));
   LS += R;
   return LS;
 };
 
-// TODO: potentially implement broadcasting more generally
+template <typename D> Tensor<D>& Tensor<D>::operator-(Tensor<D>& RS) {
+  Tensor<D>& LS = *(new Tensor<D>(*this));
+  LS -= RS;
+  return LS;
+};
+
+template <typename D> Tensor<D>& Tensor<D>::tanH() {
+  Tensor<D>& T = *(new Tensor<D>(*this));
+  for (int R = 0; R < T.rows(); R++) {
+    for (int C = 0; C < T.cols(); C++) {
+      T[R * T.cols() + C] = tanh(T[R * T.cols() + C]);
+    }
+  }
+  return T;
+};
+
+template <typename D> Tensor<D>& Tensor<D>::sum() {
+  Tensor<D>& T = *this;
+  Tensor<D> Sum(1, 1);
+  for (int R = 0; R < T.rows(); R++) {
+    for (int C = 0; C < T.cols(); C++) {
+      Sum[0] += T[R * T.cols() + C];
+    }
+  }
+  return Sum;
+}
+
 template <typename D> Tensor<D>& Tensor<D>::operator+=(Tensor<D>& RS) {
   Tensor<D>& LS = *this;
   if (LS.rows() == RS.rows() && LS.cols() == RS.cols()) {
@@ -238,6 +290,34 @@ template <typename D> Tensor<D>& Tensor<D>::operator+=(Tensor<D>& RS) {
     for (int R = 0; R < LS.rows(); R++) {
       for (int C = 0; C < LS.cols(); C++) {
         LS[R * LS.cols() + C] += RS[R];
+      }
+    }
+  } else {
+    // TODO: improve all error messages to include detailed information
+    throw invalid_argument(
+        "Dimensions of input tensors do not match & are not broadcastable.");
+  }
+  return LS;
+}
+
+template <typename D> Tensor<D>& Tensor<D>::operator-=(Tensor<D>& RS) {
+  Tensor<D>& LS = *this;
+  if (LS.rows() == RS.rows() && LS.cols() == RS.cols()) {
+    for (int R = 0; R < LS.rows(); R++) {
+      for (int C = 0; C < LS.cols(); C++) {
+        LS[R * LS.cols() + C] -= RS[R * LS.cols() + C];
+      }
+    }
+  } else if (LS.cols() == RS.cols()) {
+    for (int R = 0; R < LS.rows(); R++) {
+      for (int C = 0; C < LS.cols(); C++) {
+        LS[R * LS.cols() + C] -= RS[C];
+      }
+    }
+  } else if (LS.rows() == RS.rows()) {
+    for (int R = 0; R < LS.rows(); R++) {
+      for (int C = 0; C < LS.cols(); C++) {
+        LS[R * LS.cols() + C] -= RS[R];
       }
     }
   } else {
@@ -285,12 +365,13 @@ template <typename T> Layer<T>& NeuralNetwork<T>::layer(string LayerName) {
   return *this->layers[LayerName];
 }
 
-template <typename T> Tensor<T>& Loss<T>::forward(Tensor<T>& A) {
-  cout << this->name() << ": forward" << endl;
-  return A;
+template <typename T> Tensor<T>& MSE<T>::forward(Tensor<T>& A) {
+  // Tensor<T> Loss = (A - this->Targets).sum() / A.size();
+  // return A;
+  return (A - this->targets()).sum() / A.len();
 }
 
-template <typename T> void Loss<T>::backward() {
+template <typename T> void MSE<T>::backward() {
   cout << this->name() << ": backward" << endl;
 };
 
@@ -301,9 +382,10 @@ LinearLayer<T>::LinearLayer(int SIn, int SOut, Generator<T>& G) {
 }
 
 template <typename T> Tensor<T>& LinearLayer<T>::forward(Tensor<T>& X) {
-  Tensor<T>& Logits = this->w() * X;
-  Logits += this->b();
-  return Logits;
+  return this->w() * X + this->b();
+  // Tensor<T>& Logits = this->w() * X;
+  // Logits += this->b();
+  // return Logits;
 }
 
 template <typename T> void LinearLayer<T>::backward() {
@@ -311,8 +393,7 @@ template <typename T> void LinearLayer<T>::backward() {
 }
 
 template <typename T> Tensor<T>& TanH<T>::forward(Tensor<T>& X) {
-  cout << this->name() << ": forward" << endl;
-  return X;
+  return X.tanH();
 }
 
 template <typename T> void TanH<T>::backward() {
@@ -320,3 +401,5 @@ template <typename T> void TanH<T>::backward() {
 }
 
 } // namespace NN
+
+#endif /* !FILE_NEURAL_NETWORK_SEEN*/
