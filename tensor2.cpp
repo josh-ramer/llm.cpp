@@ -9,9 +9,8 @@
 using namespace std;
 
 // TODO: compile with flag to turn off exceptions
-#define INVALID_ARGUMENT(IDX, LEN)                                             \
-  cout << "Tensor array index out of bounds. IDX: " << IDX << " LEN: " << LEN  \
-       << endl;                                                                \
+#define INVALID_ARGUMENT(MSG)                                                  \
+  cout << MSG << endl;                                                         \
   exit(1);
 
 #define HEAP_MEMORY_SIZE 2 << 16
@@ -19,6 +18,7 @@ using namespace std;
 #define SEED 0
 
 // TODO: could we line this up with L1 line sizes?
+// To look at the program memory map compile with -Wl,-map,output.map
 // Why do this? We want our fast data structure to have its pointers on the
 // stack & it's potentially large tensors on the heap. We want those tensors to
 // be in contiguous memory & preferably in the L1 cache which will save us 100s
@@ -34,7 +34,6 @@ struct Memory {
   char* S;         // beginning of stack memory holding pointers to tensors
   char* SP;        // beginning of free stack memory
 };
-
 Memory& initMemory(Memory& M, size_t HeapMemorySize, size_t StackMemorySize,
                    char* StackBuffer) {
   M.T = (char*)malloc(HeapMemorySize);
@@ -47,6 +46,7 @@ Memory& initMemory(Memory& M, size_t HeapMemorySize, size_t StackMemorySize,
   return M;
 };
 
+Memory ProgramMemory;
 template <typename D> struct Tensor {
   size_t Rows;
   size_t Cols;
@@ -56,15 +56,18 @@ template <typename D> struct Tensor {
   D& operator[](int Index) {
     if (Index >= Len) {
       stringstream SS;
-      INVALID_ARGUMENT(Index, Len);
+      SS << "Tensor array index out of bounds. IDX: " << Index
+         << " LEN: " << Len << endl;
+      INVALID_ARGUMENT(SS.str());
     }
     return *(Data + Index);
   };
 
   friend ostream& operator<<(ostream& OStream, Tensor<D>& O) {
     OStream << "\n";
-    OStream << &O.Data << ' ' << O.Data << ' ' << &O.Rows << ' ' << &O.Cols
-            << ' ' << O.Len << endl;
+    OStream << "RowsS       ColsS       LenS        DataS       DataH" << endl;
+    OStream << &O.Rows << ' ' << &O.Cols << ' ' << &O.Len << ' ' << &O.Data
+            << ' ' << O.Data << endl;
     for (int I = 0; I < O.Len; I++) {
       OStream << setw(8) << format("{:.4f}", O[I]) << ' ';
       if (I % O.Cols == O.Cols - 1) {
@@ -72,6 +75,59 @@ template <typename D> struct Tensor {
       }
     }
     return OStream;
+  };
+
+  friend Tensor<D>& operator*(Tensor<D>& L, Tensor<D>& R) {
+    if (L.Cols != R.Rows) {
+      stringstream SS;
+      SS << "Inner dimension of input tensors does not match. (" << L.Rows
+         << "," << L.Cols << ") (" << R.Rows << "," << R.Cols << ")" << endl;
+      INVALID_ARGUMENT(SS.str());
+    }
+
+    Tensor<D>& Out = createTensor(L.Rows, R.Cols);
+    for (int RW = 0; RW < L.Rows; RW++) {
+      for (int C = 0; C < R.Cols; C++) {
+        for (int I = 0; I < L.Cols; I++) {
+          Out[RW * R.Cols + C] += L[RW * L.Cols + I] * R[C + R.Cols * I];
+        }
+      }
+    }
+    return Out;
+  };
+
+  static Tensor<D>& createTensor(size_t R, size_t C,
+                                 Tensor<D>& (*Generator)(Tensor<D>&)) {
+    Memory& M = ProgramMemory;
+    Tensor<D>* TP = new (M.SP) Tensor<D>{};
+    M.SP += sizeof(Tensor<D>);
+    Tensor<D>& T = *TP;
+
+    T.Rows = R;
+    T.Cols = C;
+    T.Len = R * C;
+
+    T.Data = new (M.TP) float[T.Len];
+    M.TP += sizeof(D) * T.Len;
+
+    T = Generator(T);
+    return T;
+  };
+
+  static Tensor<D>& createTensor(size_t R, size_t C) {
+    Memory& M = ProgramMemory;
+    Tensor<D>* TP = new (M.SP) Tensor<D>{};
+    M.SP += sizeof(Tensor<D>);
+    Tensor<D>& T = *TP;
+
+    T.Rows = R;
+    T.Cols = C;
+    T.Len = R * C;
+
+    T.Data = new (M.TP) float[T.Len];
+    M.TP += sizeof(D) * T.Len;
+
+    return T;
   };
 };
 
@@ -104,39 +160,32 @@ template <typename D> Tensor<D>& zeros(Tensor<D>& T) {
   return T;
 }
 
-template <typename D>
-Tensor<D>* createTensor(size_t R, size_t C, Memory& M,
-                        Tensor<D>& (*Generator)(Tensor<D>&)) {
-  Tensor<D>* TP = new (M.SP) Tensor<D>{};
-  M.SP += sizeof(Tensor<D>);
-  Tensor<D>& T = *TP;
-
-  T.Rows = R;
-  T.Cols = C;
-  T.Len = R * C;
-
-  T.Data = new (M.TP) float[T.Len];
-  M.TP += sizeof(D) * T.Len;
-
-  T = Generator(T);
-  return TP;
-};
-
 int main() {
   int Seed = SEED;
   size_t HeapMemorySize = HEAP_MEMORY_SIZE;
   size_t StackMemorySize = STACK_MEMORY_SIZE;
-  Memory ProgramMemory;
   char StackBuffer[STACK_MEMORY_SIZE];
 
   srand(Seed);
   ProgramMemory =
       initMemory(ProgramMemory, HeapMemorySize, StackMemorySize, StackBuffer);
 
-  Tensor<float>* X;
-  Tensor<float>* Dx;
+  Tensor<float> X;
+  Tensor<float> W;
+  Tensor<float> Logits;
 
-  X = createTensor<float>(10, 2, ProgramMemory, normal);
-  Dx = createTensor<float>(10, 2, ProgramMemory, ones);
-  cout << *X << *Dx;
+  Tensor<float> Dx;
+  Tensor<float> Dw;
+  Tensor<float> DLogits;
+
+  X = Tensor<float>::createTensor(10, 2, normal);
+  W = Tensor<float>::createTensor(2, 10, normal);
+  Logits = Tensor<float>::createTensor(10, 10, zeros);
+
+  Dx = Tensor<float>::createTensor(10, 2, ones);
+  Dw = Tensor<float>::createTensor(2, 10, ones);
+  DLogits = Tensor<float>::createTensor(10, 10, ones);
+
+  cout << X << Dx << W << Dw;
+  cout << W * X;
 }
