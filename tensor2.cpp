@@ -97,6 +97,96 @@ template <typename D> struct Tensor {
         P->Backward(T);
     }
   }
+  static void tanHBackward(Tensor<D>& T) {
+    Tensor<D> One = createTensor(T.Rows, T.Cols, ones, false);
+    Tensor<D> Diff = One - squares(T);
+    *T.Grad += Diff;
+    cout << "tanh backward:" << endl;
+    cout << "I gradient: " << T.Grad << endl;
+    for (auto P : T.Parents) {
+      if (P->Backward != NULL)
+        P->Backward(*P);
+    }
+  };
+
+  static Tensor<D>& tanH(Tensor<D>& I) {
+    vector<Tensor<D>*> Parents = {&I};
+    Tensor<D>& O =
+        createTensor(I.Rows, I.Cols, Parents, Tensor<D>::tanHBackward, true);
+
+    for (int R = 0; R < I.Rows; R++) {
+      for (int C = 0; C < I.Cols; C++) {
+        O[R * I.Cols + C] = tanh(I[R * I.Cols + C]);
+      }
+    }
+    return O;
+  };
+
+  static Tensor<D>& squares(Tensor<D>& I) {
+    vector<Tensor<D>*> Parents = {&I};
+    Tensor<D>& S = createTensor(I.Rows, I.Cols, Parents, nullptr, false);
+    for (int R = 0; R < I.Rows; R++) {
+      for (int C = 0; C < I.Cols; C++) {
+        S[R * I.Cols + C] += I[R * I.Cols + C] * I[R * I.Cols + C];
+      }
+    }
+    return S;
+  }
+
+  // tensor to be broadcast must be on the RHS, should that change?
+  friend Tensor<D>& operator-=(Tensor<D>& LS, Tensor<D>& RS) {
+    if (LS.Rows == RS.Rows && LS.Cols == RS.Cols) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          LS[R * LS.Cols + C] -= RS[R * LS.Cols + C];
+        }
+      }
+    } else if (LS.Cols == RS.Cols && RS.Rows == 1) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          LS[R * LS.Cols + C] -= RS[C];
+        }
+      }
+    } else if (LS.Rows == RS.Rows && RS.Cols == 1) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          LS[R * LS.Cols + C] -= RS[R];
+        }
+      }
+    }
+    // TODO: only possible for operator-, not operator-=
+    //  else if (LS.cols() == RS.cols() && LS.rows() == 1) {
+    //    for (int R = 0; R < RS.rows(); R++) {
+    //      for (int C = 0; C < LS.cols(); C++) {
+    //        LS[C] -= RS[R * LS.cols() + C];
+    //      }
+    //    }
+    //  } else if (LS.rows() == RS.rows() && LS.cols() == 1) {
+    //    for (int R = 0; R < LS.rows(); R++) {
+    //      for (int C = 0; C < RS.cols(); C++) {
+    //        LS[R] -= RS[R * LS.cols() + C];
+    //      }
+    //    }
+    //  }
+    else {
+      // TODO: improve all error messages to include detailed information
+      stringstream SS;
+      SS << "Dimensions of input tensors do not match & are "
+            "not broadcastable. The "
+            "dimension to be broadcast must be of length 1. LS ("
+         << LS.Rows << ", " << LS.Cols << ") RS (" << RS.Rows << ", " << RS.Cols
+         << ")";
+      throw invalid_argument(SS.str());
+    }
+    return LS;
+  }
+
+  friend Tensor<D>& operator-(Tensor<D>& LS, Tensor<D>& RS) {
+    vector<Tensor<D>*> Parents = {&LS, &RS};
+    Tensor<D>& O = createTensor(LS.Rows, LS.Cols, Parents, nullptr, false);
+    LS -= RS;
+    return LS;
+  };
 
   // tensor to be broadcast must be on the RHS, should that change?
   Tensor<D>& operator+=(Tensor<D>& RS) {
@@ -140,11 +230,9 @@ template <typename D> struct Tensor {
       INVALID_ARGUMENT(SS.str());
     }
 
-    Tensor<D> Gradient =
-        createTensor(L.Rows, R.Cols, vector<Tensor<D>*>(), ones);
     vector<Tensor<D>*> Parents = {&L, &R};
     Tensor<D>& Out =
-        createTensor(L.Rows, R.Cols, Parents, Tensor<D>::mmBackward, &Gradient);
+        createTensor(L.Rows, R.Cols, Parents, Tensor<D>::mmBackward, true);
     for (int RW = 0; RW < L.Rows; RW++) {
       for (int C = 0; C < R.Cols; C++) {
         for (int I = 0; I < L.Cols; I++) {
@@ -157,7 +245,7 @@ template <typename D> struct Tensor {
 
   static Tensor<D>& createTensor(size_t R, size_t C,
                                  Tensor<D>& (*Generator)(Tensor<D>&) = NULL,
-                                 Tensor<D>* Gradient = NULL) {
+                                 bool Gradient = false) {
     Memory& M = ProgramMemory;
     Tensor<D>* TP = new (M.SP) Tensor<D>{};
     M.SP += sizeof(*TP);
@@ -170,7 +258,9 @@ template <typename D> struct Tensor {
     T.Data = new (M.TP) float[T.Len];
     M.TP += sizeof(D) * T.Len;
 
-    T.Grad = Gradient;
+    if (Gradient) {
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+    }
     if (Generator != NULL) {
       T = Generator(T);
     }
@@ -179,8 +269,8 @@ template <typename D> struct Tensor {
 
   static Tensor<D>& createTensor(size_t R, size_t C, vector<Tensor<D>*> Parents,
                                  void (*Backward)(Tensor<D>&) = NULL,
-                                 Tensor<D>* Gradient = NULL,
-                                 Tensor<D>& (*Generator)(Tensor<D>&) = NULL) {
+                                 Tensor<D>& (*Generator)(Tensor<D>&) = NULL,
+                                 bool Gradient = false) {
     // TODO: handle allocation of too much memory
     Memory& M = ProgramMemory;
     Tensor<D>* TP = new (M.SP) Tensor<D>{};
@@ -195,10 +285,12 @@ template <typename D> struct Tensor {
     T.Data = new (M.TP) float[T.Len];
     M.TP += DataSize;
 
-    T.Grad = Gradient;
     T.Parents = Parents;
     T.Backward = Backward;
 
+    if (Gradient) {
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+    }
     if (Generator != NULL) {
       T = Generator(T);
     }
@@ -207,9 +299,36 @@ template <typename D> struct Tensor {
   };
 
   static Tensor<D>& createTensor(size_t R, size_t C, vector<Tensor<D>*> Parents,
+                                 void (*Backward)(Tensor<D>&) = NULL,
+                                 bool Gradient = false) {
+    // TODO: handle allocation of too much memory
+    Memory& M = ProgramMemory;
+    Tensor<D>* TP = new (M.SP) Tensor<D>{};
+    M.SP += sizeof(*TP);
+    Tensor<D>& T = *TP;
+
+    T.Rows = R;
+    T.Cols = C;
+    T.Len = R * C;
+
+    size_t DataSize = sizeof(D) * T.Len;
+    T.Data = new (M.TP) float[T.Len];
+    M.TP += DataSize;
+
+    T.Parents = Parents;
+    T.Backward = Backward;
+
+    if (Gradient) {
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+    }
+
+    return T;
+  };
+
+  static Tensor<D>& createTensor(size_t R, size_t C, vector<Tensor<D>*> Parents,
                                  Tensor<D>& (*Generator)(Tensor<D>&) = NULL,
                                  void (*Backward)(Tensor<D>&) = NULL,
-                                 Tensor<D>* Gradient = NULL) {
+                                 bool Gradient = false) {
     // TODO: handle allocation of too much memory
     Memory& M = ProgramMemory;
     Tensor<D>* TP = new (M.SP) Tensor<D>{};
@@ -224,10 +343,12 @@ template <typename D> struct Tensor {
     T.Data = new (M.TP) float[T.Len];
     M.TP += DataSize;
 
-    T.Grad = Gradient;
     T.Parents = Parents;
     T.Backward = Backward;
 
+    if (Gradient) {
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+    }
     if (Generator != NULL) {
       T = Generator(T);
     }
@@ -278,19 +399,21 @@ int main() {
   Tensor<float> X;
   Tensor<float> W;
   Tensor<float> Logits;
+  Tensor<float> A;
 
   Tensor<float> Dx;
   Tensor<float> Dw;
   Tensor<float> DLogits;
 
-  X = Tensor<float>::createTensor(10, 2, Tensor<float>::normal);
-  W = Tensor<float>::createTensor(10, 10, Tensor<float>::normal);
-  Dx = Tensor<float>::createTensor(10, 2, Tensor<float>::ones);
-  Dw = Tensor<float>::createTensor(10, 10, Tensor<float>::ones);
+  X = Tensor<float>::createTensor(10, 2, Tensor<float>::normal, true);
+  W = Tensor<float>::createTensor(10, 10, Tensor<float>::normal, true);
 
-  cout << X << Dx << W << Dw;
   Logits = W * X;
-  // cout << Logits << *Logits.Grad;
+  A = Tensor<float>::tanH(Logits);
+
+  cout << "X:" << X << "\nW:" << W;
+  cout << "\nLogits:" << Logits << "\nLogits.Grad:" << *Logits.Grad;
+  cout << "\nActivations:" << A << "\nActivations.Grad:" << *A.Grad;
 
   cleanMemory(ProgramMemory);
 }
