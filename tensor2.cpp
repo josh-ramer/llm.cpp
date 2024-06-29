@@ -13,8 +13,8 @@ using namespace std;
   cout << MSG << endl;                                                         \
   exit(1);
 
-#define HEAP_MEMORY_SIZE 2 << 12
-#define STACK_MEMORY_SIZE 2 << 8
+#define HEAP_MEMORY_SIZE 2 << 16
+#define STACK_MEMORY_SIZE 2 << 10
 #define SEED 0
 
 // TODO: could we line this up with L1 line sizes?
@@ -57,7 +57,7 @@ template <typename D> struct Tensor {
   size_t Len;
   D* Data;
   Tensor<D>* Grad = NULL;
-  void (*Backward)(Tensor<D>&) = NULL;
+  void (*BackProp)(Tensor<D>&) = NULL;
   vector<Tensor<D>*> Parents;
   vector<Tensor<D>*> Children;
 
@@ -85,34 +85,48 @@ template <typename D> struct Tensor {
     return OStream;
   };
 
-  static void mmBackward(Tensor<D>& T) {
-    Tensor<D>& L = *T.Parents[0];
-    Tensor<D>& R = *T.Parents[1];
-    Tensor<D>& O = *T.Children[0];
-    *L.Grad += *R.Grad * *O.Grad;
-    *R.Grad += *L.Grad * *O.Grad;
+  void backward() { this->BackProp(*this); }
 
-    for (auto P : O.Parents) {
-      if (P->Backward != NULL)
-        P->Backward(T);
+  Tensor<D>& t() const {
+    Tensor<D> I = *this;
+    Tensor<D>& Trns = createTensor(I.Cols, I.Rows);
+    for (int R = 0; R < I.Rows; R++) {
+      for (int C = 0; C < I.Cols; C++) {
+        Trns[C * I.Rows + R] = I[C + R * I.Cols];
+      }
+    }
+    return Trns;
+  }
+
+  static void mmBackward(Tensor<D>& Logits) {
+    Tensor<D>& L = *Logits.Parents[0];
+    Tensor<D>& R = *Logits.Parents[1];
+
+    *L.Grad += Logits.Grad->mm(R.t());
+    *R.Grad += L.t().mm(*Logits.Grad);
+
+    for (auto P : Logits.Parents) {
+      if (P->BackProp != NULL)
+        P->BackProp(*P);
     }
   }
-  static void tanHBackward(Tensor<D>& T) {
-    Tensor<D> One = createTensor(T.Rows, T.Cols, ones, false);
-    Tensor<D> Diff = One - squares(T);
-    *T.Grad += Diff;
-    cout << "tanh backward:" << endl;
-    cout << "I gradient: " << T.Grad << endl;
-    for (auto P : T.Parents) {
-      if (P->Backward != NULL)
-        P->Backward(*P);
+
+  static void tanHBackward(Tensor<D>& A) {
+    Tensor<D>& One = createTensor(A.Rows, A.Cols, ones);
+    Tensor<D>& Diff = One - A.squares();
+    Tensor<D>& Logits = *A.Parents[0];
+    *Logits.Grad += Diff * *A.Grad;
+    // TODO: this will break down-> use reverse topological order
+    for (auto P : A.Parents) {
+      if (P->BackProp != NULL)
+        P->BackProp(*P);
     }
   };
 
-  static Tensor<D>& tanH(Tensor<D>& I) {
+  Tensor<D>& tanH() {
+    Tensor<D>& I = *this;
     vector<Tensor<D>*> Parents = {&I};
-    Tensor<D>& O =
-        createTensor(I.Rows, I.Cols, Parents, Tensor<D>::tanHBackward, true);
+    Tensor<D>& O = createTensor(I.Rows, I.Cols, Parents, tanHBackward, true);
 
     for (int R = 0; R < I.Rows; R++) {
       for (int C = 0; C < I.Cols; C++) {
@@ -122,8 +136,10 @@ template <typename D> struct Tensor {
     return O;
   };
 
-  static Tensor<D>& squares(Tensor<D>& I) {
+  Tensor<D>& squares() {
+    Tensor<D>& I = *this;
     vector<Tensor<D>*> Parents = {&I};
+    // TODO: squares backprop?
     Tensor<D>& S = createTensor(I.Rows, I.Cols, Parents, nullptr, false);
     for (int R = 0; R < I.Rows; R++) {
       for (int C = 0; C < I.Cols; C++) {
@@ -132,6 +148,113 @@ template <typename D> struct Tensor {
     }
     return S;
   }
+
+  friend Tensor<D>& operator*(D Data, Tensor<D>& RS) { return RS * Data; };
+  friend Tensor<D>& operator*(Tensor<D>& LS, D Data) {
+    Tensor<D>& O = createTensor(LS.Rows, LS.Cols);
+    for (int R = 0; R < LS.Rows; R++) {
+      for (int C = 0; C < LS.Cols; C++) {
+        O[R * LS.Cols + C] = LS[R * LS.Cols + C] * Data;
+      }
+    }
+    return O;
+  };
+
+  friend Tensor<D>& operator*(Tensor<D>& LS, Tensor<D>& RS) {
+    // TODO: elementwize multiplication backprop?
+    // TODO: broadcasting?
+    if (LS.Rows != RS.Rows || LS.Cols != RS.Cols) {
+      stringstream SS;
+      SS << "Dimensions of input tensors do not match: (" << LS.Rows << ", "
+         << LS.Cols << ") RS (" << RS.Rows << ", " << RS.Cols << ")";
+      INVALID_ARGUMENT(SS.str());
+    }
+    Tensor<D>& O = createTensor(LS.Rows, LS.Cols);
+    for (int R = 0; R < LS.Rows; R++) {
+      for (int C = 0; C < LS.Cols; C++) {
+        O[R * LS.Cols + C] += LS[R * LS.Cols + C] * RS[R * LS.Cols + C];
+      }
+    }
+    return O;
+  };
+
+  Tensor<D>& operator/(D RS) {
+    Tensor<D>& LS = *this;
+    Tensor<D>& O = createTensor(LS.Rows, LS.Cols);
+    for (int R = 0; R < LS.Rows; R++) {
+      for (int C = 0; C < LS.Cols; C++) {
+        O[R * LS.Cols + C] = LS[R * LS.Cols + C] / RS;
+      }
+    }
+    return O;
+  };
+
+  Tensor<D>& operator/(Tensor<D>& RS) {
+    Tensor<D>& LS = *this;
+    Tensor<D>& O = createTensor(LS.Rows, RS.Rows);
+
+    // TODO: adapt to handle 3D tensors (later ndim tensors)
+    // tensor to be broadcast must be on the RHS, should that change?
+    if (RS.Cols == 1 && RS.Cols == 1) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          O[R * LS.Cols + C] = LS[R * LS.Cols + C] / RS[0];
+        }
+      }
+    } else if (LS.Rows == RS.Rows && LS.Cols == RS.Cols) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          O[R * LS.Cols + C] = LS[R * LS.Cols + C] / RS[R * LS.Cols + C];
+        }
+      }
+    } else if (LS.Rows == RS.Rows && RS.Cols == 1) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          O[R * LS.Cols + C] = LS[R * LS.Cols + C] / RS[R];
+        }
+      }
+    } else if (LS.Cols == RS.Cols && RS.Rows == 1) {
+      for (int R = 0; R < LS.Rows; R++) {
+        for (int C = 0; C < LS.Cols; C++) {
+          O[R * LS.Cols + C] = LS[R * LS.Cols + C] / RS[C];
+        }
+      }
+    } else {
+      INVALID_ARGUMENT("The dimension to be broadcast must be of length 1.");
+    }
+
+    return O;
+  };
+
+  Tensor<D>& sum() {
+    Tensor<D>& T = *this;
+    D S = 0;
+    for (int R = 0; R < T.Rows; R++) {
+      for (int C = 0; C < T.Cols; C++) {
+        S += T[R * T.Cols + C];
+      }
+    }
+    return createTensor(S);
+  };
+
+  static void lossBackward(Tensor<D>& L) {
+    L.Grad = &createTensor(L.Rows, L.Cols, ones);
+    Tensor<D>& A = *L.Parents[0];
+    for (auto P : L.Parents) {
+      if (P->BackProp != NULL)
+        P->BackProp(*P);
+    }
+  }
+
+  Tensor<D>& mse(Tensor<D>& Targets) {
+    Tensor<D>& A = *this;
+    Tensor<D>& Diff = (Targets - A) / A.Len;
+    Tensor<D>& L = Diff.squares().sum();
+    *A.Grad -= 2.f * Diff;
+    L.Parents.push_back(this);
+    L.BackProp = lossBackward;
+    return L;
+  };
 
   // tensor to be broadcast must be on the RHS, should that change?
   friend Tensor<D>& operator-=(Tensor<D>& LS, Tensor<D>& RS) {
@@ -154,7 +277,8 @@ template <typename D> struct Tensor {
         }
       }
     }
-    // TODO: only possible for operator-, not operator-=
+    // TODO: only possible for operator-, not operator-= -> rethink - & -=
+    // operator overloads
     //  else if (LS.cols() == RS.cols() && LS.rows() == 1) {
     //    for (int R = 0; R < RS.rows(); R++) {
     //      for (int C = 0; C < LS.cols(); C++) {
@@ -169,7 +293,6 @@ template <typename D> struct Tensor {
     //    }
     //  }
     else {
-      // TODO: improve all error messages to include detailed information
       stringstream SS;
       SS << "Dimensions of input tensors do not match & are "
             "not broadcastable. The "
@@ -183,9 +306,10 @@ template <typename D> struct Tensor {
 
   friend Tensor<D>& operator-(Tensor<D>& LS, Tensor<D>& RS) {
     vector<Tensor<D>*> Parents = {&LS, &RS};
-    Tensor<D>& O = createTensor(LS.Rows, LS.Cols, Parents, nullptr, false);
-    LS -= RS;
-    return LS;
+    // TODO: subtraction backprop?
+    Tensor<D>& O = createTensor(LS);
+    O -= RS;
+    return O;
   };
 
   // tensor to be broadcast must be on the RHS, should that change?
@@ -210,7 +334,6 @@ template <typename D> struct Tensor {
         }
       }
     } else {
-      // TODO: improve all error messages to include detailed information
       stringstream SS;
       SS << "Dimensions of input tensors do not match & are "
             "not broadcastable. The "
@@ -222,7 +345,8 @@ template <typename D> struct Tensor {
     return LS;
   }
 
-  friend Tensor<D>& operator*(Tensor<D>& L, Tensor<D>& R) {
+  Tensor<D>& mm(Tensor<D>& R) {
+    Tensor<D>& L = *this;
     if (L.Cols != R.Rows) {
       stringstream SS;
       SS << "Inner dimension of input tensors does not match. (" << L.Rows
@@ -231,16 +355,51 @@ template <typename D> struct Tensor {
     }
 
     vector<Tensor<D>*> Parents = {&L, &R};
-    Tensor<D>& Out =
+    Tensor<D>& O =
         createTensor(L.Rows, R.Cols, Parents, Tensor<D>::mmBackward, true);
     for (int RW = 0; RW < L.Rows; RW++) {
       for (int C = 0; C < R.Cols; C++) {
         for (int I = 0; I < L.Cols; I++) {
-          Out[RW * R.Cols + C] += L[RW * L.Cols + I] * R[C + R.Cols * I];
+          O[RW * R.Cols + C] += L[RW * L.Cols + I] * R[C + R.Cols * I];
         }
       }
     }
-    return Out;
+    return O;
+  };
+
+  static Tensor<D>& createTensor(D Data) {
+    Tensor<D>& T = createTensor(1, 1);
+    T[0] = Data;
+    return T;
+  };
+
+  static Tensor<D>& createTensor(Tensor<D>& C) {
+    Memory& M = ProgramMemory;
+    Tensor<D>* TP = new (M.SP) Tensor<D>{};
+    M.SP += sizeof(*TP);
+    Tensor<D>& T = *TP;
+
+    T.Rows = C.Rows;
+    T.Cols = C.Cols;
+    T.Len = C.Rows * C.Cols;
+
+    T.Data = new (M.TP) float[T.Len];
+    M.TP += sizeof(D) * T.Len;
+
+    for (int I = 0; I < C.Len; I++) {
+      T[I] = C[I];
+    }
+
+    if (C.Grad != NULL) {
+      T.Grad = &createTensor(*C.Grad);
+    } else {
+      T.Grad = NULL;
+    }
+
+    if (C.BackProp != NULL) {
+      T.BackProp = C.BackProp;
+    }
+    return T;
   };
 
   static Tensor<D>& createTensor(size_t R, size_t C,
@@ -259,8 +418,11 @@ template <typename D> struct Tensor {
     M.TP += sizeof(D) * T.Len;
 
     if (Gradient) {
-      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), zeros);
+    } else {
+      T.Grad = NULL;
     }
+
     if (Generator != NULL) {
       T = Generator(T);
     }
@@ -268,7 +430,7 @@ template <typename D> struct Tensor {
   };
 
   static Tensor<D>& createTensor(size_t R, size_t C, vector<Tensor<D>*> Parents,
-                                 void (*Backward)(Tensor<D>&) = NULL,
+                                 void (*BackProp)(Tensor<D>&) = NULL,
                                  Tensor<D>& (*Generator)(Tensor<D>&) = NULL,
                                  bool Gradient = false) {
     // TODO: handle allocation of too much memory
@@ -286,11 +448,14 @@ template <typename D> struct Tensor {
     M.TP += DataSize;
 
     T.Parents = Parents;
-    T.Backward = Backward;
+    T.BackProp = BackProp;
 
     if (Gradient) {
-      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), zeros);
+    } else {
+      T.Grad = NULL;
     }
+
     if (Generator != NULL) {
       T = Generator(T);
     }
@@ -299,7 +464,7 @@ template <typename D> struct Tensor {
   };
 
   static Tensor<D>& createTensor(size_t R, size_t C, vector<Tensor<D>*> Parents,
-                                 void (*Backward)(Tensor<D>&) = NULL,
+                                 void (*BackProp)(Tensor<D>&) = NULL,
                                  bool Gradient = false) {
     // TODO: handle allocation of too much memory
     Memory& M = ProgramMemory;
@@ -316,10 +481,12 @@ template <typename D> struct Tensor {
     M.TP += DataSize;
 
     T.Parents = Parents;
-    T.Backward = Backward;
+    T.BackProp = BackProp;
 
     if (Gradient) {
-      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), zeros);
+    } else {
+      T.Grad = NULL;
     }
 
     return T;
@@ -327,12 +494,12 @@ template <typename D> struct Tensor {
 
   static Tensor<D>& createTensor(size_t R, size_t C, vector<Tensor<D>*> Parents,
                                  Tensor<D>& (*Generator)(Tensor<D>&) = NULL,
-                                 void (*Backward)(Tensor<D>&) = NULL,
+                                 void (*BackProp)(Tensor<D>&) = NULL,
                                  bool Gradient = false) {
     // TODO: handle allocation of too much memory
     Memory& M = ProgramMemory;
     Tensor<D>* TP = new (M.SP) Tensor<D>{};
-    M.SP += sizeof(TP);
+    M.SP += sizeof(*TP);
     Tensor<D>& T = *TP;
 
     T.Rows = R;
@@ -344,10 +511,12 @@ template <typename D> struct Tensor {
     M.TP += DataSize;
 
     T.Parents = Parents;
-    T.Backward = Backward;
+    T.BackProp = BackProp;
 
     if (Gradient) {
-      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), ones);
+      T.Grad = &createTensor(R, C, vector<Tensor<D>*>(), zeros);
+    } else {
+      T.Grad = NULL;
     }
     if (Generator != NULL) {
       T = Generator(T);
@@ -400,20 +569,28 @@ int main() {
   Tensor<float> W;
   Tensor<float> Logits;
   Tensor<float> A;
-
-  Tensor<float> Dx;
-  Tensor<float> Dw;
-  Tensor<float> DLogits;
+  Tensor<float> Targets;
+  Tensor<float> Loss;
 
   X = Tensor<float>::createTensor(10, 2, Tensor<float>::normal, true);
-  W = Tensor<float>::createTensor(10, 10, Tensor<float>::normal, true);
+  W = Tensor<float>::createTensor(2, 10, Tensor<float>::normal, true);
+  Targets = Tensor<float>::createTensor(10, 10, Tensor<float>::ones, false);
 
-  Logits = W * X;
-  A = Tensor<float>::tanH(Logits);
+  Logits = X.mm(W);
+  A = Logits.tanH();
+  Loss = A.mse(Targets);
 
   cout << "X:" << X << "\nW:" << W;
-  cout << "\nLogits:" << Logits << "\nLogits.Grad:" << *Logits.Grad;
-  cout << "\nActivations:" << A << "\nActivations.Grad:" << *A.Grad;
+  cout << "\nLogits:" << Logits;
+  cout << "\nActivations:" << A;
+
+  cout << "\nLoss:" << Loss << endl;
+  Loss.backward();
+
+  cout << "\nLoss.Grad:" << *Loss.Grad;
+  cout << "\nActivations.Grad:" << *A.Grad;
+  cout << "\nLogits.Grad:" << *Logits.Grad;
+  cout << "\nX.Grad:" << *X.Grad << "\nW.Grad:" << *W.Grad;
 
   cleanMemory(ProgramMemory);
 }
